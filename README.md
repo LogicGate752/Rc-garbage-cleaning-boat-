@@ -99,3 +99,4 @@ To build the sketch locally, search for and install this single external manager
 
 ## 📝 License
 This project is open-source and available under the **MIT License**. Feel free to fork, hack, modify, and build upon it!
+you can use any 3d model of a boat, print it and use the circuit we have made.
