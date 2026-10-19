@@ -1,0 +1,132 @@
+#include <WiFi.h>
+#include <WebServer.h>
+#include <ESP32Servo.h>
+
+// --- Hotspot Setup ---
+const char* ssid = "RC_Trash_Boat";
+const char* password = "password123";
+
+WebServer server(80);
+Servo steeringServo;
+
+// --- Pin Settings ---
+#define SERVO_PIN      13
+#define TRIG_PIN       12
+#define ECHO_PIN       14
+
+#define MOTOR_IN1      26
+#define MOTOR_IN2      27
+#define MOTOR_ENA      25 
+
+#define MOTOR_IN3      32
+#define MOTOR_IN4      33
+#define MOTOR_ENB      18 
+
+const int TANK_EMPTY_DIST = 30; 
+const int TANK_FULL_DIST  = 5;  
+const int motorSpeed = 200;     
+
+// --- Web UI Stored in Flash Memory (Prevents Compile Lag) ---
+const char HTML_PAGE[] PROGMEM = R"rawliteral(
+<!DOCTYPE html><html><head><meta name="viewport" content="width=device-width, initial-scale=1.0"><style>
+body{font-family:Arial,sans-serif;text-align:center;background:#f4f7f6;margin:0;padding:20px;}
+.container{max-width:400px;margin:auto;background:white;padding:20px;border-radius:10px;box-shadow:0 4px 8px rgba(0,0,0,0.1);}
+.btn{width:75px;height:75px;margin:5px;font-size:18px;background:#2196F3;color:white;border:none;border-radius:50%;font-weight:bold;cursor:pointer;}
+.btn:active{background:#1976D2;}
+.slider{width:80%;margin:20px 0;} .status{font-size:24px;font-weight:bold;color:#4CAF50;}
+</style></head><body><div class="container"><h2>🚢 RC Boat Control</h2><div class="status">Trash Level: <span id="t">0</span>%</div><br>
+<button class="btn" onmousedown="f('forward')" onmouseup="f('stop')" ontouchstart="f('forward')" ontouchend="f('stop')">▲</button><br>
+<button class="btn" onmousedown="f('left')" onmouseup="f('stop')" ontouchstart="f('left')" ontouchend="f('stop')">◀</button>
+<button class="btn" style="background:#f44336" onclick="f('stop')">■</button>
+<button class="btn" onmousedown="f('right')" onmouseup="f('stop')" ontouchstart="f('right')" ontouchend="f('stop')">▶</button><br>
+<button class="btn" onmousedown="f('backward')" onmouseup="f('stop')" ontouchstart="f('backward')" ontouchend="f('stop')">▼</button>
+<p>Steering: <span id="sv">90</span>°</p><input type="range" min="40" max="140" value="90" class="slider" oninput="s(this.value)"></div>
+<script>
+function f(d){fetch('/control?dir='+d);}
+function s(v){document.getElementById('sv').innerText=v;fetch('/control?servo='+v);}
+setInterval(function(){fetch('/getTrash').then(r=>r.text()).then(d=>{document.getElementById('t').innerText=d;});},1000);
+</script></body></html>
+)rawliteral";
+
+void setup() {
+  Serial.begin(115200);
+  
+  pinMode(TRIG_PIN, OUTPUT); pinMode(ECHO_PIN, INPUT);
+  pinMode(MOTOR_IN1, OUTPUT); pinMode(MOTOR_IN2, OUTPUT);
+  pinMode(MOTOR_IN3, OUTPUT); pinMode(MOTOR_IN4, OUTPUT);
+  pinMode(MOTOR_ENA, OUTPUT); pinMode(MOTOR_ENB, OUTPUT);
+
+  ESP32PWM::allocateTimer(0);
+  steeringServo.setPeriodHertz(50);
+  steeringServo.attach(SERVO_PIN, 500, 2400);
+  steeringServo.write(90); 
+
+  WiFi.softAP(ssid, password);
+  Serial.println("\n=== Access Point Active ===");
+  Serial.print("Connect to Wi-Fi, then visit: "); Serial.println(WiFi.softAPIP());
+
+  server.on("/", []() { server.send_P(200, "text/html", HTML_PAGE); });
+  server.on("/control", handleControl);
+  server.on("/getTrash", handleTrashPercentage);
+  server.begin();
+}
+
+void loop() {
+  server.handleClient();
+  delay(2); 
+}
+
+// --- Driver Commands ---
+void moveStop() {
+  digitalWrite(MOTOR_IN1, LOW); digitalWrite(MOTOR_IN2, LOW);
+  digitalWrite(MOTOR_IN3, LOW); digitalWrite(MOTOR_IN4, LOW);
+}
+void moveForward() {
+  analogWrite(MOTOR_ENA, motorSpeed); analogWrite(MOTOR_ENB, motorSpeed);
+  digitalWrite(MOTOR_IN1, HIGH); digitalWrite(MOTOR_IN2, LOW);
+  digitalWrite(MOTOR_IN3, HIGH); digitalWrite(MOTOR_IN4, LOW);
+}
+void moveBackward() {
+  analogWrite(MOTOR_ENA, motorSpeed); analogWrite(MOTOR_ENB, motorSpeed);
+  digitalWrite(MOTOR_IN1, LOW); digitalWrite(MOTOR_IN2, HIGH);
+  digitalWrite(MOTOR_IN3, LOW); digitalWrite(MOTOR_IN4, HIGH);
+}
+void turnLeft() {
+  analogWrite(MOTOR_ENA, motorSpeed); analogWrite(MOTOR_ENB, motorSpeed);
+  digitalWrite(MOTOR_IN1, LOW); digitalWrite(MOTOR_IN2, HIGH); 
+  digitalWrite(MOTOR_IN3, HIGH); digitalWrite(MOTOR_IN4, LOW); 
+}
+void turnRight() {
+  analogWrite(MOTOR_ENA, motorSpeed); analogWrite(MOTOR_ENB, motorSpeed);
+  digitalWrite(MOTOR_IN1, HIGH); digitalWrite(MOTOR_IN2, LOW); 
+  digitalWrite(MOTOR_IN3, LOW); digitalWrite(MOTOR_IN4, HIGH); 
+}
+
+int getTrashPercentage() {
+  digitalWrite(TRIG_PIN, LOW); delayMicroseconds(2);
+  digitalWrite(TRIG_PIN, HIGH); delayMicroseconds(10);
+  digitalWrite(TRIG_PIN, LOW);
+  long duration = pulseIn(ECHO_PIN, HIGH, 25000); 
+  if (duration == 0) return 0;
+  int distance = duration * 0.034 / 2;
+  return constrain(map(distance, TANK_EMPTY_DIST, TANK_FULL_DIST, 0, 100), 0, 100); 
+}
+
+void handleControl() {
+  if (server.hasArg("dir")) {
+    String dir = server.arg("dir");
+    if (dir == "forward") moveForward();
+    else if (dir == "backward") moveBackward();
+    else if (dir == "left") turnLeft();
+    else if (dir == "right") turnRight();
+    else if (dir == "stop") moveStop();
+  }
+  if (server.hasArg("servo")) {
+    steeringServo.write(server.arg("servo").toInt());
+  }
+  server.send(200, "text/plain", "OK");
+}
+
+void handleTrashPercentage() {
+  server.send(200, "text/plain", String(getTrashPercentage()));
+}
